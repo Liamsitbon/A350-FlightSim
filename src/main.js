@@ -128,6 +128,24 @@ function createWorld() {
   field.receiveShadow = true;
   scene.add(field);
 
+  import WeatherSystem from './weather.js';
+import WeatherUI from './weatherUI.js';
+
+// After your Three.js scene setup:
+const weather = new WeatherSystem();
+const weatherUI = new WeatherUI(weather);
+weatherUI.init(document.querySelector('.sim-shell'));
+
+// Add CSS
+const link = document.createElement('link');
+link.rel = 'stylesheet';
+link.href = './src/weatherStyles.css';
+document.head.appendChild(link);
+
+// In your animation loop:
+weather.updateWeather(deltaTime);
+weatherUI.update();
+
   const waterMaterial = new THREE.MeshStandardMaterial({
     color: 0x2d8ebf,
     roughness: 0.36,
