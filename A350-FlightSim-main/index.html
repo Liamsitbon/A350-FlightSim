@@ -1,0 +1,134 @@
+<!doctype html>
+<link rel="icon" href="data:,">
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>A350-900 Web Simulator</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <main class="sim-shell">
+      <canvas id="sim-canvas" aria-label="A350-900 simulator viewport"></canvas>
+
+      <section class="hud hud-top" aria-label="Primary flight display">
+        <div class="hud-block">
+          <span class="hud-label">SPD</span>
+          <strong id="speed">0</strong>
+          <span class="hud-unit">KT</span>
+        </div>
+        <div class="hud-block">
+          <span class="hud-label">ALT</span>
+          <strong id="altitude">0</strong>
+          <span class="hud-unit">FT</span>
+        </div>
+        <div class="hud-block">
+          <span class="hud-label">HDG</span>
+          <strong id="heading">000</strong>
+          <span class="hud-unit">DEG</span>
+        </div>
+        <div class="hud-block">
+          <span class="hud-label">V/S</span>
+          <strong id="vertical-speed">0</strong>
+          <span class="hud-unit">FPM</span>
+        </div>
+      </section>
+
+      <section class="hud hud-left" aria-label="Flight controls">
+        <label class="control control-throttle">
+          <span>THR</span>
+          <input id="throttle" type="range" min="0" max="100" value="0" />
+          <output id="throttle-output">0%</output>
+        </label>
+        <label class="control control-flaps">
+          <span>FLP</span>
+          <input id="flaps" type="range" min="0" max="4" step="1" value="2" />
+          <output id="flaps-output">2</output>
+        </label>
+        <button id="gear-toggle" class="icon-button" type="button" aria-label="Landing gear">
+          <span class="gear-icon" aria-hidden="true"></span>
+        </button>
+      </section>
+
+      <section class="hud flight-pad" aria-label="Manual flight controls">
+        <button class="pad-button pad-up" type="button" data-control="pitch-down" aria-label="Descend">
+          <span class="pad-icon icon-up" aria-hidden="true"></span>
+        </button>
+        <button class="pad-button pad-left" type="button" data-control="roll-left" aria-label="Bank left">
+          <span class="pad-icon icon-left" aria-hidden="true"></span>
+        </button>
+        <button class="pad-button pad-right" type="button" data-control="roll-right" aria-label="Bank right">
+          <span class="pad-icon icon-right" aria-hidden="true"></span>
+        </button>
+        <button class="pad-button pad-down" type="button" data-control="pitch-up" aria-label="Climb">
+          <span class="pad-icon icon-down" aria-hidden="true"></span>
+        </button>
+        <button class="pad-button pad-yaw-left" type="button" data-control="yaw-left" aria-label="Turn left">
+          <span class="pad-icon icon-yaw-left" aria-hidden="true"></span>
+        </button>
+        <button class="pad-button pad-yaw-right" type="button" data-control="yaw-right" aria-label="Turn right">
+          <span class="pad-icon icon-yaw-right" aria-hidden="true"></span>
+        </button>
+      </section>
+
+      <section class="hud flight-pad camera-pad" aria-label="Camera controls">
+        <button class="pad-button cam-up" type="button" data-control="camera-up" aria-label="Camera up">
+          <span class="pad-icon icon-up" aria-hidden="true"></span>
+        </button>
+        <button class="pad-button cam-left" type="button" data-control="camera-left" aria-label="Camera left">
+          <span class="pad-icon icon-left" aria-hidden="true"></span>
+        </button>
+        <button class="pad-button cam-right" type="button" data-control="camera-right" aria-label="Camera right">
+          <span class="pad-icon icon-right" aria-hidden="true"></span>
+        </button>
+        <button class="pad-button cam-down" type="button" data-control="camera-down" aria-label="Camera down">
+          <span class="pad-icon icon-down" aria-hidden="true"></span>
+        </button>
+        <button class="pad-button cam-zoom-in" type="button" data-control="camera-zoom-in" aria-label="Zoom in">
+          <span class="pad-icon" aria-hidden="true">+</span>
+        </button>
+        <button class="pad-button cam-zoom-out" type="button" data-control="camera-zoom-out" aria-label="Zoom out">
+          <span class="pad-icon" aria-hidden="true">−</span>
+        </button>
+      </section>
+
+      <section class="hud hud-bottom" aria-label="Aircraft status">
+        <div class="status-strip">
+          <span id="flight-mode">PARKED</span>
+          <span id="gear-state">GEAR DOWN</span>
+          <span id="model-state">PROCEDURAL A350-900</span>
+          <span id="mission-state">RING 1/5</span>
+        </div>
+        <div class="attitude" aria-label="Attitude indicator">
+          <div id="attitude-bg" class="attitude-bg"></div>
+          <div class="attitude-aircraft"></div>
+          <div class="attitude-mark attitude-mark-top"></div>
+          <div class="attitude-mark attitude-mark-bottom"></div>
+        </div>
+      </section>
+
+      <section class="hud hud-right" aria-label="Bank and Stall indicators">
+        <div class="indicator-block">
+          <span class="indicator-label">BANK</span>
+          <strong id="bank-angle">0°</strong>
+        </div>
+        <div class="indicator-block">
+          <span class="indicator-label">STALL</span>
+          <strong id="stall-indicator">OK</strong>
+        </div>
+      </section>
+
+      <div id="loading" class="loading">INITIALIZING</div>
+    </main>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
