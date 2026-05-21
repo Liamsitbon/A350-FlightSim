@@ -21,6 +21,8 @@ const hud = {
   missionState: document.querySelector("#mission-state"),
   flightMode: document.querySelector("#flight-mode"),
   attitudeBg: document.querySelector("#attitude-bg"),
+  bankAngle: document.querySelector("#bank-angle"),
+  stallIndicator: document.querySelector("#stall-indicator"),
   controlButtons: [...document.querySelectorAll("[data-control]")],
 };
 
@@ -37,9 +39,24 @@ const heldControls = new Set();
 const controlPulses = new Map();
 const checkpoints = [];
 
+// Physics constants
+const STALL_SPEED_KTS = 60;
+const CRUISE_SPEED_KTS = 450;
+const MAX_PITCH_ANGLE = Math.PI / 3; // 60 degrees
+const MAX_ROLL_ANGLE = Math.PI / 2.5; // 72 degrees
+const GRAVITY = 9.81;
+
+// Warning system
+const warnings = {
+  active: new Set(),
+  lastTriggerTime: new Map(),
+  cooldownMs: 2000,
+};
+
 const state = {
   throttle: 0,
   flaps: 2,
+  speedBrake: false,
   gearDown: true,
   airspeed: 0,
   verticalSpeed: 0,
@@ -54,6 +71,13 @@ const state = {
   missionIndex: 0,
   missionPulse: 0,
   position: new THREE.Vector3(0, GROUND_Y, -1140),
+  
+  // Physics state
+  altitude: 0,
+  aoa: 0, // Angle of attack
+  fuelWeight: 100000, // kg
+  engineN1: [0, 0], // Engine RPM percentage
+  engineN2: [0, 0],
 };
 
 const scene = new THREE.Scene();
@@ -102,6 +126,7 @@ createAircraftShadow();
 createProceduralA350();
 loadLicensedA350Model();
 bindControls();
+createWarningSystem();
 resize();
 
 // Initialize weather UI
@@ -440,11 +465,15 @@ function bindControls() {
     keys.add(event.code);
     keyPulses.set(event.code, performance.now() + CONTROL_PULSE_MS);
     if (event.code === "KeyG" && !event.repeat) toggleGear();
+    if (event.code === "Space" && !event.repeat) toggleSpeedBrake();
     if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(event.code)) {
       event.preventDefault();
     }
   });
-  window.addEventListener("keyup", (event) => keys.delete(event.code));
+  window.addEventListener("keyup", (event) => {
+    keys.delete(event.code);
+    if (event.code === "Space") state.speedBrake = false;
+  });
   window.addEventListener("resize", resize);
 
   hud.throttleInput.addEventListener("input", () => {
@@ -488,6 +517,13 @@ function toggleGear() {
   const gear = aircraftVisual.getObjectByName("gear");
   if (gear) gear.visible = state.gearDown;
   hud.gearToggle.classList.toggle("is-up", !state.gearDown);
+  if (state.gearDown) {
+    triggerWarning("gear-deployed");
+  }
+}
+
+function toggleSpeedBrake() {
+  state.speedBrake = !state.speedBrake;
 }
 
 function resize() {
@@ -498,107 +534,161 @@ function resize() {
   renderer.setSize(width, height, false);
 }
 
-function animate() {
-  const dt = Math.min(clock.getDelta(), 0.035);
-  updateInputs(dt);
-  updateFlightModel(dt);
-  updateAircraftTransform();
-  updateAircraftShadow();
-  updateMission(dt);
-  updateCamera(dt);
-  updateHud();
-  updateTelemetry();
-  
-  // Update weather
-  weather.updateWeather(dt);
-  weatherUI.update();
-  
-  renderer.render(scene, camera);
-  updateRenderProbe();
+function createWarningSystem() {
+  const warningDiv = document.createElement("div");
+  warningDiv.id = "warnings-container";
+  warningDiv.style.cssText = `
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 1000;
+    pointer-events: none;
+  `;
+  document.body.appendChild(warningDiv);
+
+  window.warningContainer = warningDiv;
 }
 
-function updateInputs(dt) {
-  const throttleDelta = 0.34 * dt;
-  if (keys.has("KeyW")) state.throttle = Math.min(1, state.throttle + throttleDelta);
-  if (keys.has("KeyS")) state.throttle = Math.max(0, state.throttle - throttleDelta);
+function triggerWarning(type) {
+  const now = performance.now();
+  const lastTime = warnings.lastTriggerTime.get(type) || 0;
 
-  state.pitchInput =
-    axisInput(["ArrowDown", "KeyK"], ["ArrowUp", "KeyI"], "pitch-up", "pitch-down");
-  state.rollInput =
-    axisInput(["ArrowLeft", "KeyJ"], ["ArrowRight", "KeyL"], "roll-left", "roll-right");
-  state.yawInput =
-    axisInput(["KeyA", "KeyQ"], ["KeyD", "KeyE"], "yaw-left", "yaw-right");
-
-  if (state.pitchInput > 0 && state.throttle < 0.92) {
-    state.throttle = Math.min(0.92, state.throttle + 0.82 * dt);
+  // Only trigger if enough time has passed (cooldown)
+  if (now - lastTime < warnings.cooldownMs) {
+    return;
   }
 
-  hud.throttleInput.value = Math.round(state.throttle * 100);
+  warnings.lastTriggerTime.set(type, now);
+  warnings.active.add(type);
 
-  const targetPitch = state.pitchInput * 0.38;
-  const targetRoll = state.rollInput * 0.58;
-  const targetYaw = state.yawInput * 0.5;
+  const warningMessages = {
+    "stall-warning": { text: "STALL WARNING", color: "#ff7b72", icon: "⚠️" },
+    "low-altitude": { text: "LOW ALTITUDE", color: "#ffc857", icon: "⚠️" },
+    "overspeed": { text: "OVERSPEED", color: "#ff7b72", icon: "⚠️" },
+    "terrain-warning": { text: "TERRAIN WARNING", color: "#ff7b72", icon: "🚨" },
+    "configuration": { text: "CHECK CONFIGURATION", color: "#ffc857", icon: "⚠️" },
+    "landing-gear": { text: "LANDING GEAR", color: "#6ee7f9", icon: "ℹ️" },
+    "gear-deployed": { text: "GEAR DOWN", color: "#6ee7f9", icon: "✓" },
+  };
 
-  state.pitch = THREE.MathUtils.lerp(state.pitch, targetPitch, 4.2 * dt);
-  state.roll = THREE.MathUtils.lerp(state.roll, targetRoll, 4.5 * dt);
-  state.yaw += (targetYaw + Math.sin(state.roll) * 0.42) * dt;
-}
+  const msg = warningMessages[type] || { text: type.toUpperCase(), color: "#ffc857", icon: "⚠️" };
+  const warning = document.createElement("div");
+  warning.style.cssText = `
+    padding: 8px 12px;
+    background: rgba(0, 0, 0, 0.8);
+    border: 2px solid ${msg.color};
+    border-radius: 4px;
+    color: ${msg.color};
+    font-size: 12px;
+    font-weight: bold;
+    font-family: monospace;
+    white-space: nowrap;
+    animation: slideIn 0.3s ease-out;
+  `;
+  warning.textContent = `${msg.icon} ${msg.text}`;
+  warning.dataset.type = type;
 
-function axisInput(positiveKeys, negativeKeys, positiveControl, negativeControl) {
-  const positive =
-    positiveKeys.some((code) => activeKey(code)) || activeControl(positiveControl);
-  const negative =
-    negativeKeys.some((code) => activeKey(code)) || activeControl(negativeControl);
-  return Number(positive) - Number(negative);
-}
+  window.warningContainer.appendChild(warning);
 
-function activeKey(code) {
-  const pulseUntil = keyPulses.get(code) || 0;
-  return keys.has(code) || pulseUntil > performance.now();
-}
-
-function activeControl(control) {
-  const pulseUntil = controlPulses.get(control) || 0;
-  return heldControls.has(control) || pulseUntil > performance.now();
+  // Auto-remove warning after 3 seconds
+  setTimeout(() => {
+    warning.style.animation = "slideOut 0.3s ease-in";
+    setTimeout(() => {
+      warning.remove();
+      warnings.active.delete(type);
+    }, 300);
+  }, 3000);
 }
 
 function updateFlightModel(dt) {
   const speedKts = state.airspeed * MS_TO_KNOTS;
-  const drag = 0.00072 * state.airspeed * state.airspeed;
+  state.altitude = Math.max(0, state.position.y - GROUND_Y);
+  
+  // Calculate angle of attack
+  state.aoa = Math.abs(state.pitch);
+
+  // Engine spool up
+  state.engineN1[0] = THREE.MathUtils.lerp(state.engineN1[0], state.throttle * 100, 0.1);
+  state.engineN1[1] = THREE.MathUtils.lerp(state.engineN1[1], state.throttle * 100, 0.1);
+
+  // Advanced drag calculation with flaps and gear
+  const baseDrag = 0.00072 * state.airspeed * state.airspeed;
   const gearDrag = state.gearDown ? 0.44 : 0;
   const flapsDrag = state.flaps * 0.16;
+  const speedBrakeDrag = state.speedBrake ? 2.5 : 0;
+  const aoaDrag = Math.pow(Math.sin(state.aoa), 2) * 0.15;
+  
+  const totalDrag = baseDrag + gearDrag + flapsDrag + speedBrakeDrag + aoaDrag;
+
+  // Stall detection and recovery
+  const stallSpeed = STALL_SPEED_KTS + (state.flaps * 3);
+  const isStalled = speedKts < stallSpeed && state.airborne && state.aoa > 0.15;
+  
+  if (isStalled) {
+    triggerWarning("stall-warning");
+    // Stall causes descent
+    state.verticalSpeed = Math.min(state.verticalSpeed, -8);
+  }
+
+  // Thrust calculation - engines don't respond to pitch
   const thrust = state.throttle * 15.2;
   const brake = keys.has("Space") ? 8.5 : 0;
-  state.airspeed = Math.max(0, state.airspeed + (thrust - drag - gearDrag - flapsDrag - brake) * dt);
+  
+  state.airspeed = Math.max(0, state.airspeed + (thrust - totalDrag - brake) * dt);
 
-  const lift = Math.max(0, (speedKts - 60 + state.flaps * 12) / 86);
+  // Check overspeed
+  if (speedKts > 530) {
+    triggerWarning("overspeed");
+  }
+
+  // Lift calculation based on speed, AoA, and flaps
+  const liftCoeff = Math.sin(state.aoa) * 0.8 + (state.flaps * 0.15);
+  const lift = Math.max(0, (speedKts - stallSpeed + state.flaps * 12) / 86 * liftCoeff);
   const pitchLift = Math.sin(state.pitch) * state.airspeed * 2.55;
   const targetVerticalSpeed = (lift - 0.5) * 7.5 + pitchLift;
   const response = state.airborne ? 1.7 : 0.9;
   state.verticalSpeed = THREE.MathUtils.lerp(state.verticalSpeed, targetVerticalSpeed, response * dt);
 
+  // Forward movement
   const forward = new THREE.Vector3(Math.sin(state.yaw), 0, Math.cos(state.yaw));
   state.position.addScaledVector(forward, state.airspeed * dt);
 
+  // Rotation readiness - no automatic thrust boost
   const rotationReady = speedKts > 74 && state.pitch > 0.035;
   if (rotationReady) {
     state.airborne = true;
     state.verticalSpeed = Math.max(state.verticalSpeed, 6.5);
   }
 
+  // Vertical movement and landing logic
   if (state.airborne) {
     state.position.y += state.verticalSpeed * dt;
+    
     if (state.position.y <= GROUND_Y && state.verticalSpeed < 0) {
       state.position.y = GROUND_Y;
       state.verticalSpeed = 0;
       state.airborne = false;
       state.pitch = Math.max(state.pitch, 0);
+      triggerWarning("landing-gear");
     }
   } else {
     state.position.y = GROUND_Y;
     state.verticalSpeed = 0;
     state.roll *= 0.92;
     state.yaw += state.yawInput * 0.24 * dt;
+  }
+
+  // Low altitude warning
+  if (state.airborne && state.altitude < 1000 && state.verticalSpeed < 0) {
+    triggerWarning("low-altitude");
+  }
+
+  // Configuration warning
+  if (speedKts > 250 && state.flaps > 2) {
+    triggerWarning("configuration");
   }
 }
 
@@ -674,11 +764,56 @@ function updateCamera(dt) {
   camera.lookAt(lookAt);
 }
 
+function updateInputs(dt) {
+  const throttleDelta = 0.34 * dt;
+  if (keys.has("KeyW")) state.throttle = Math.min(1, state.throttle + throttleDelta);
+  if (keys.has("KeyS")) state.throttle = Math.max(0, state.throttle - throttleDelta);
+
+  state.pitchInput =
+    axisInput(["ArrowDown", "KeyK"], ["ArrowUp", "KeyI"], "pitch-up", "pitch-down");
+  state.rollInput =
+    axisInput(["ArrowLeft", "KeyJ"], ["ArrowRight", "KeyL"], "roll-left", "roll-right");
+  state.yawInput =
+    axisInput(["KeyA", "KeyQ"], ["KeyD", "KeyE"], "yaw-left", "yaw-right");
+
+  // Do NOT automatically increase throttle when pitching up
+  // This ensures proper manual control
+
+  hud.throttleInput.value = Math.round(state.throttle * 100);
+
+  const targetPitch = THREE.MathUtils.clamp(state.pitchInput * 0.38, -MAX_PITCH_ANGLE, MAX_PITCH_ANGLE);
+  const targetRoll = THREE.MathUtils.clamp(state.rollInput * 0.58, -MAX_ROLL_ANGLE, MAX_ROLL_ANGLE);
+  const targetYaw = state.yawInput * 0.5;
+
+  state.pitch = THREE.MathUtils.lerp(state.pitch, targetPitch, 4.2 * dt);
+  state.roll = THREE.MathUtils.lerp(state.roll, targetRoll, 4.5 * dt);
+  state.yaw += (targetYaw + Math.sin(state.roll) * 0.42) * dt;
+}
+
+function axisInput(positiveKeys, negativeKeys, positiveControl, negativeControl) {
+  const positive =
+    positiveKeys.some((code) => activeKey(code)) || activeControl(positiveControl);
+  const negative =
+    negativeKeys.some((code) => activeKey(code)) || activeControl(negativeControl);
+  return Number(positive) - Number(negative);
+}
+
+function activeKey(code) {
+  const pulseUntil = keyPulses.get(code) || 0;
+  return keys.has(code) || pulseUntil > performance.now();
+}
+
+function activeControl(control) {
+  const pulseUntil = controlPulses.get(control) || 0;
+  return heldControls.has(control) || pulseUntil > performance.now();
+}
+
 function updateHud() {
   const speedKts = Math.round(state.airspeed * MS_TO_KNOTS);
-  const altitudeFt = Math.max(0, Math.round((state.position.y - GROUND_Y) * METERS_TO_FEET));
+  const altitudeFt = Math.max(0, Math.round(state.altitude * METERS_TO_FEET));
   const verticalFpm = Math.round(state.verticalSpeed * 196.85);
   const heading = ((THREE.MathUtils.radToDeg(state.yaw) % 360) + 360) % 360;
+  const bankAngle = THREE.MathUtils.radToDeg(state.roll);
 
   hud.speed.textContent = speedKts.toString().padStart(3, "0");
   hud.altitude.textContent = altitudeFt.toString();
@@ -687,6 +822,22 @@ function updateHud() {
   hud.throttleOutput.textContent = `${Math.round(state.throttle * 100)}%`;
   hud.flapsOutput.textContent = state.flaps.toString();
   hud.gearState.textContent = state.gearDown ? "GEAR DOWN" : "GEAR UP";
+  hud.bankAngle.textContent = `${Math.abs(Math.round(bankAngle))}°`;
+
+  // Update stall indicator
+  const stallSpeed = STALL_SPEED_KTS + (state.flaps * 3);
+  const stallMargin = speedKts - stallSpeed;
+  
+  if (stallMargin < 0) {
+    hud.stallIndicator.textContent = "STALL";
+    hud.stallIndicator.className = "critical";
+  } else if (stallMargin < 10) {
+    hud.stallIndicator.textContent = "WARN";
+    hud.stallIndicator.className = "warn";
+  } else {
+    hud.stallIndicator.textContent = `+${Math.round(stallMargin)}`;
+    hud.stallIndicator.className = "";
+  }
 
   if (state.airborne) {
     hud.flightMode.textContent = state.verticalSpeed > 3 ? "CLIMB" : state.verticalSpeed < -1.5 ? "DESCENT" : "FLIGHT";
@@ -722,7 +873,54 @@ function updateTelemetry() {
   canvas.dataset.pitch = state.pitch.toFixed(3);
   canvas.dataset.roll = state.roll.toFixed(3);
   canvas.dataset.yaw = state.yaw.toFixed(3);
-  canvas.dataset.altitudeMeters = Math.max(0, state.position.y - GROUND_Y).toFixed(2);
+  canvas.dataset.altitudeMeters = state.altitude.toFixed(2);
   canvas.dataset.airspeed = state.airspeed.toFixed(2);
   canvas.dataset.missionIndex = String(state.missionIndex);
+  canvas.dataset.stallWarning = String(warnings.active.has("stall-warning"));
 }
+
+function animate() {
+  const dt = Math.min(clock.getDelta(), 0.035);
+  updateInputs(dt);
+  updateFlightModel(dt);
+  updateAircraftTransform();
+  updateAircraftShadow();
+  updateMission(dt);
+  updateCamera(dt);
+  updateHud();
+  updateTelemetry();
+  
+  // Update weather
+  weather.updateWeather(dt);
+  weatherUI.update();
+  
+  renderer.render(scene, camera);
+  updateRenderProbe();
+}
+
+// Add CSS animations for warnings
+const style = document.createElement("style");
+style.textContent = `
+  @keyframes slideIn {
+    from {
+      opacity: 0;
+      transform: translateX(100px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+  
+  @keyframes slideOut {
+    from {
+      opacity: 1;
+      transform: translateX(0);
+    }
+    to {
+      opacity: 0;
+      transform: translateX(100px);
+    }
+  }
+`;
+document.head.appendChild(style);
