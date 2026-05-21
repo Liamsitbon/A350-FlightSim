@@ -17,6 +17,7 @@ Then open:
 ```text
 http://localhost:5173
 ```
+(If you pull a new version then you need to change 5173 to a different number each time.)
 
 ## Controls
 
