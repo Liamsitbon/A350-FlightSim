@@ -6,7 +6,7 @@ An early open-source Airbus A350-900 style flight simulator for the web.
 
 <img width="670" height="373" alt="Screenshot 2026-05-30 at 10 36 29" src="https://github.com/user-attachments/assets/9d3d4baf-2ce1-44f5-a8c1-b2a19f076715" />
 
-!!! if you'r want a click to play go to https://liamsitbon.github.io/A350-FlightSim/ and it's start the game directly from the browser and no download needed!!!
+!!! If you're want a Click To Play go to https://liamsitbon.github.io/A350-FlightSim/ and it's start the game directly from the browser and no download needed!!!
 
 This first build runs as a static Three.js app and includes a procedural A350-900 placeholder, runway environment, basic flight physics, HUD, throttle, flaps, and landing gear.
 
