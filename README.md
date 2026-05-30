@@ -25,7 +25,7 @@ git pull
 ```
 ## How To Open The Game?
 
-Run locally in CMD/Terminal:
+Run locally in CMD/Terminal in the game path:
 
 ```bash
 python3 -m http.server 5173
