@@ -88,17 +88,19 @@ const state = {
   
   // Physics state
   altitude: 0,
-  aoa: 0, // Angle of attack
+  aoa: 0, // Angle of attack (radians)
   fuelWeight: 100000, // kg
   engineN1: [0, 0], // Engine RPM percentage
   engineN2: [0, 0],
+  stallState: false, // Are we in a stall?
+  stallTimer: 0, // How long have we been stalling?
 };
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x8dd4ff);
 scene.fog = new THREE.Fog(0x91d3ff, 900, 6800);
 
-const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 18000);
+const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 10, 18000);
 camera.position.set(0, 24, -88);
 
 const renderer = new THREE.WebGLRenderer({
@@ -106,6 +108,7 @@ const renderer = new THREE.WebGLRenderer({
   antialias: true,
   preserveDrawingBuffer: true,
   powerPreference: "high-performance",
+  logarithmicDepthBuffer: true,
 });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -648,40 +651,76 @@ function bankLabel(angle) {
   return `${degrees > 0 ? "L" : "R"} ${Math.abs(degrees)}°`;
 }
 
+// Calculate realistic angle of attack based on pitch and descent
+function calculateAoA(pitch, groundSpeed, verticalSpeed) {
+  // More realistic AoA calculation: based on pitch angle and flight path
+  let aoa = pitch;
+  
+  if (groundSpeed > 0.1) {
+    // When descending, reduce effective AoA
+    const descentAngle = Math.atan2(-verticalSpeed, groundSpeed);
+    aoa = pitch - descentAngle;
+  }
+  
+  return Math.max(0, aoa);
+}
+
+// Realistic stall descent speed: approximately 1/3 of normal descent
+function getStallDescentSpeed() {
+  return -2.8; // m/s - slow descent when stalled (realistic for A350)
+}
+
 function updateFlightModel(dt) {
   let speedKts = state.airspeed * MS_TO_KNOTS;
   state.altitude = Math.max(0, state.position.y - GROUND_Y);
   
-  // Calculate angle of attack
-  state.aoa = Math.abs(state.pitch);
+  // Calculate realistic angle of attack based on pitch and flight path
+  const forward = new THREE.Vector3(Math.sin(state.yaw), 0, Math.cos(state.yaw));
+  const pitchForwardFactor = THREE.MathUtils.clamp(Math.cos(state.pitch), 0.12, 1);
+  const groundSpeed = Math.max(0, state.airspeed * pitchForwardFactor);
+  
+  state.aoa = calculateAoA(state.pitch, groundSpeed, state.verticalSpeed);
 
-  // Engine spool up
-  state.engineN1[0] = THREE.MathUtils.lerp(state.engineN1[0], state.throttle * 100, 0.1);
-  state.engineN1[1] = THREE.MathUtils.lerp(state.engineN1[1], state.throttle * 100, 0.1);
+  // Engine spool up/down - realistic response
+  state.engineN1[0] = THREE.MathUtils.lerp(state.engineN1[0], state.throttle * 100, 0.08);
+  state.engineN1[1] = THREE.MathUtils.lerp(state.engineN1[1], state.throttle * 100, 0.08);
 
-  // Advanced drag calculation with flaps and gear
+  // Advanced drag calculation with flaps, gear, and AoA
   const baseDrag = 0.00072 * state.airspeed * state.airspeed;
   const gearDrag = state.gearDown ? 0.44 : 0;
   const flapsDrag = state.flaps * 0.16;
   const speedBrakeDrag = state.speedBrake ? 2.5 : 0;
-  const aoaDrag = Math.pow(Math.sin(state.aoa), 2) * 0.15;
+  // High AoA creates exponential drag penalty (especially at stall)
+  const aoaDrag = Math.pow(Math.sin(state.aoa), 2) * 0.35;
   
   const totalDrag = baseDrag + gearDrag + flapsDrag + speedBrakeDrag + aoaDrag;
 
-  // Stall detection and recovery
+  // Stall detection - based on speed, AoA, and altitude
   const stallSpeed = STALL_SPEED_KTS + (state.flaps * 3);
-  const isStalled = speedKts < stallSpeed && state.airborne && state.aoa > 0.15;
+  const stalling = speedKts < stallSpeed && state.airborne && state.aoa > 0.25;
   
-  if (isStalled) {
+  if (stalling && !state.stallState) {
+    // Entering stall
+    state.stallState = true;
+    state.stallTimer = 0;
     triggerWarning("stall-warning");
-    // Stall causes descent
-    state.verticalSpeed = Math.min(state.verticalSpeed, -8);
+  } else if (!stalling && state.stallState) {
+    // Recovering from stall
+    state.stallState = false;
+  }
+  
+  if (state.stallState) {
+    state.stallTimer += dt;
   }
 
-  // Thrust calculation - engines don't respond to pitch
-  const thrust = state.throttle * 15.2;
+  // Thrust calculation - does NOT help sustain high AoA flight
+  // Engines have limits and cannot support extreme pitch angles
+  const aoaPitchAngle = Math.abs(state.pitch);
+  const engineCapacityFactor = Math.max(0, 1 - Math.pow(aoaPitchAngle / MAX_PITCH_ANGLE, 2) * 0.8);
+  const thrust = state.throttle * 15.2 * engineCapacityFactor;
   const brake = keys.has("Space") ? 8.5 : 0;
   
+  // Speed change: thrust minus drag
   state.airspeed = Math.max(0, state.airspeed + (thrust - totalDrag - brake) * dt);
   speedKts = state.airspeed * MS_TO_KNOTS;
 
@@ -690,6 +729,7 @@ function updateFlightModel(dt) {
     triggerWarning("overspeed");
   }
 
+  // Turbulence effects
   if (state.airborne && weather.turbulence > 0.03) {
     const turbulence = weather.getTurbulenceEffect();
     state.pitchRate += turbulence.pitch * 0.26 * dt;
@@ -698,14 +738,26 @@ function updateFlightModel(dt) {
     state.verticalSpeed += turbulence.vertical * dt;
   }
 
-  // Lift calculation based on speed, AoA, flaps, and bank angle.
-  const liftCoeff = Math.sin(state.aoa) * 0.8 + (state.flaps * 0.15);
-  const lift = Math.max(0, (speedKts - stallSpeed + state.flaps * 12) / 86 * liftCoeff);
-  const rollLiftFactor = Math.cos(normalizeAngle(state.roll));
-  const bankedLift = rollLiftFactor < 0 ? Math.max(-0.55, rollLiftFactor) : Math.max(0.2, rollLiftFactor);
-  const pitchLift = Math.sin(state.pitch) * state.airspeed * 2.55;
-  const gravitySink = state.airborne ? GRAVITY * 0.08 : 0;
-  const targetVerticalSpeed = (lift - 0.5) * 7.5 * bankedLift + pitchLift - gravitySink;
+  // Realistic lift and descent calculations
+  let targetVerticalSpeed;
+  
+  if (state.stallState) {
+    // In stall: descend at realistic stall descent rate
+    targetVerticalSpeed = getStallDescentSpeed();
+    // Lose speed rapidly in stall
+    state.airspeed = Math.max(0, state.airspeed - 2.5 * dt);
+  } else {
+    // Normal flight - calculate lift based on speed and AoA
+    const liftCoeff = Math.sin(state.aoa) * 0.8 + (state.flaps * 0.15);
+    const lift = Math.max(0, (speedKts - stallSpeed + state.flaps * 12) / 86 * liftCoeff);
+    const rollLiftFactor = Math.cos(normalizeAngle(state.roll));
+    const bankedLift = rollLiftFactor < 0 ? Math.max(-0.55, rollLiftFactor) : Math.max(0.2, rollLiftFactor);
+    const pitchLift = Math.sin(state.pitch) * state.airspeed * 2.55;
+    const gravitySink = state.airborne ? GRAVITY * 0.08 : 0;
+    
+    targetVerticalSpeed = (lift - 0.5) * 7.5 * bankedLift + pitchLift - gravitySink;
+  }
+  
   const response = state.airborne ? 1.7 : 0.9;
   state.verticalSpeed = THREE.MathUtils.lerp(state.verticalSpeed, targetVerticalSpeed, response * dt);
 
@@ -713,21 +765,24 @@ function updateFlightModel(dt) {
     triggerWarning("bank-angle");
   }
 
-  // Forward movement, with wind changing ground track instead of just HUD numbers.
+  // Forward movement with realistic pitch effects
+  // Nose down = acceleration, nose up = deceleration
+  const noseDownAcceleration = Math.sin(-state.pitch) * 2.2; // Negative pitch (down) accelerates
+  const pitchSpeedModifier = Math.max(0.1, 1 + noseDownAcceleration * 0.15);
+  state.airspeed = Math.max(0, state.airspeed * pitchSpeedModifier * dt + state.airspeed * (1 - dt));
+
   const headingDeg = ((THREE.MathUtils.radToDeg(state.yaw) % 360) + 360) % 360;
   const wind = weather.getWindEffect(headingDeg);
   const headwindMs = wind.headwind / MS_TO_KNOTS;
   const crosswindMs = wind.crosswind / MS_TO_KNOTS;
-  const forward = new THREE.Vector3(Math.sin(state.yaw), 0, Math.cos(state.yaw));
-  const right = new THREE.Vector3(Math.cos(state.yaw), 0, -Math.sin(state.yaw));
-  const pitchForwardFactor = THREE.MathUtils.clamp(Math.cos(state.pitch), 0.12, 1);
-  const groundSpeed = Math.max(0, state.airspeed * pitchForwardFactor - headwindMs * (state.airborne ? 0.45 : 0.12));
-  state.position.addScaledVector(forward, groundSpeed * dt);
+  const groundSpeedAdjusted = Math.max(0, state.airspeed * pitchForwardFactor - headwindMs * (state.airborne ? 0.45 : 0.12));
+  state.position.addScaledVector(forward, groundSpeedAdjusted * dt);
   if (state.airborne) {
+    const right = new THREE.Vector3(Math.cos(state.yaw), 0, -Math.sin(state.yaw));
     state.position.addScaledVector(right, crosswindMs * 0.45 * dt);
   }
 
-  // Rotation readiness - no automatic thrust boost
+  // Rotation readiness
   const rotationReady = speedKts > 74 && state.pitch > 0.035;
   if (rotationReady) {
     state.airborne = true;
@@ -742,6 +797,7 @@ function updateFlightModel(dt) {
       state.position.y = GROUND_Y;
       state.verticalSpeed = 0;
       state.airborne = false;
+      state.stallState = false;
       state.pitch = Math.max(state.pitch, 0);
       state.pitchRate = 0;
       state.rollRate = 0;
@@ -753,6 +809,7 @@ function updateFlightModel(dt) {
     state.verticalSpeed = 0;
     state.roll = THREE.MathUtils.lerp(state.roll, 0, THREE.MathUtils.clamp(4.2 * dt, 0, 1));
     state.rollRate = 0;
+    state.stallState = false;
   }
 
   // Low altitude warning
@@ -968,7 +1025,7 @@ function updateHud() {
   const stallSpeed = STALL_SPEED_KTS + (state.flaps * 3);
   const stallMargin = speedKts - stallSpeed;
   
-  if (stallMargin < 0) {
+  if (state.stallState) {
     hud.stallIndicator.textContent = "STALL";
     hud.stallIndicator.className = "critical";
   } else if (stallMargin < 10) {
@@ -1017,6 +1074,8 @@ function updateTelemetry() {
   canvas.dataset.airspeed = state.airspeed.toFixed(2);
   canvas.dataset.missionIndex = String(state.missionIndex);
   canvas.dataset.stallWarning = String(warnings.active.has("stall-warning"));
+  canvas.dataset.stallState = String(state.stallState);
+  canvas.dataset.aoa = THREE.MathUtils.radToDeg(state.aoa).toFixed(2);
 }
 
 function animate() {

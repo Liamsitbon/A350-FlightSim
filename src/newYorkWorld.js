@@ -57,7 +57,7 @@ export function createNewYorkWorld(scene) {
   batteryPark.position.set(0, 0.02, -3800);
   scene.add(batteryPark);
 
-  // Streets grid pattern
+// Streets grid pattern
   const streetMaterial = new THREE.MeshStandardMaterial({
     color: 0x333333,
     roughness: 0.7,
@@ -67,14 +67,16 @@ export function createNewYorkWorld(scene) {
   // Horizontal streets (Avenues)
   for (let i = -3000; i <= 3000; i += 300) {
     const street = new THREE.Mesh(new THREE.BoxGeometry(3000, 0.02, 80), streetMaterial);
-    street.position.set(0, 0.01, i);
+    // הועלה מ-0.01 ל-0.04
+    street.position.set(0, 0.04, i);
     scene.add(street);
   }
 
   // Vertical streets
   for (let i = -1000; i <= 1000; i += 200) {
     const street = new THREE.Mesh(new THREE.BoxGeometry(80, 0.02, 8000), streetMaterial);
-    street.position.set(i, 0.01, 0);
+    // הועלה מ-0.01 ל-0.04
+    street.position.set(i, 0.04, 0);
     scene.add(street);
   }
 
